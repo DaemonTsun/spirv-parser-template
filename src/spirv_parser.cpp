@@ -13,15 +13,7 @@
 #define get_spirv_parse_error(ERR, FMT, ...) \
     if (ERR != nullptr) { *ERR = error{.what = format_error(FMT __VA_OPT__(,) __VA_ARGS__), .file = __FILE__, .line = __LINE__}; }
 
-void init(spirv_id_instruction *idinstr)
-{
-    ::init(&idinstr->members);
-}
-
-void free(spirv_id_instruction *idinstr)
-{
-    ::free(&idinstr->members);
-}
+#define UNCALCULATED max_value(u32)
 
 void init(spirv_entry_point *ep)
 {
@@ -31,6 +23,16 @@ void init(spirv_entry_point *ep)
 void free(spirv_entry_point *ep)
 {
     ::free(&ep->execution_modes);
+}
+
+void init(spirv_type *type)
+{
+    ::init(&type->members);
+}
+
+void free(spirv_type *type)
+{
+    ::free(&type->members);
 }
 
 void init(spirv_info *info)
@@ -45,9 +47,9 @@ void free(spirv_info *info)
     if (info == nullptr)
         return;
 
-    ::free<true>(&info->id_instructions);
+    ::free(&info->id_instructions);
     ::free<true>(&info->entry_points);
-    ::free(&info->types);
+    ::free<true>(&info->types);
     ::free(&info->variables);
     ::free(&info->decorations);
 
@@ -63,9 +65,293 @@ spirv_entry_point *get_entry_point_by_id(spirv_info *info, SpvId id)
     return nullptr;
 }
 
-void handle_spirv_op_type(u64 i, spirv_id_instruction *id_instr, const spirv_info *info)
+spirv_type *_get_type_by_id(spirv_info *info, SpvId id)
+{
+    return info->types.data + info->id_instructions[id].extra;
+}
+
+spirv_variable *_get_variable_by_id(spirv_info *info, SpvId id)
+{
+    return info->variables.data + info->id_instructions[id].extra;
+}
+
+const char *storage_class_name(SpvStorageClass storage)
+{
+    switch (storage)
+    {
+    case SpvStorageClassUniformConstant: return "uniform_constant";
+    case SpvStorageClassInput: return "input";
+    case SpvStorageClassUniform: return "uniform";
+    case SpvStorageClassOutput: return "output";
+    case SpvStorageClassWorkgroup: return "workgroup";
+    case SpvStorageClassCrossWorkgroup: return "cross_workgroup";
+    case SpvStorageClassPrivate: return "private";
+    case SpvStorageClassFunction: return "function";
+    case SpvStorageClassGeneric: return "generic";
+    case SpvStorageClassPushConstant: return "push_constant";
+    case SpvStorageClassAtomicCounter: return "atomic_counter";
+    case SpvStorageClassImage: return "image";
+    case SpvStorageClassStorageBuffer: return "storage_buffer";
+    default: return "";
+    }
+
+    return "";
+}
+
+u64 calculate_type_size(spirv_type *t, spirv_info *info)
+{
+    if (t->size != UNCALCULATED)
+        return t->size;
+
+    switch (t->instruction->opcode)
+    {
+    case SpvOpTypeVoid:   return 0;
+    case SpvOpTypeBool:   return 0;
+    case SpvOpTypeInt:    return t->instruction->words[2] / 8;
+    case SpvOpTypeFloat:  return t->instruction->words[2] / 8;
+    case SpvOpTypeVector:
+    {
+        SpvId comp_id = (SpvId)t->instruction->words[2];
+        spirv_type *comp_type = _get_type_by_id(info, comp_id);
+        u32 comp_count = t->instruction->words[3];
+        return calculate_type_size(comp_type, info) * comp_count;
+    }
+    case SpvOpTypeMatrix:
+    {
+        SpvId comp_id = (SpvId)t->instruction->words[2];
+        spirv_type *comp_type = _get_type_by_id(info, comp_id);
+        u32 comp_count = t->instruction->words[3];
+        return calculate_type_size(comp_type, info) * comp_count;
+    }
+    case SpvOpTypeImage:        return 0;
+    case SpvOpTypeSampler:      return 0;
+    case SpvOpTypeSampledImage: return 0;
+    case SpvOpTypeArray:
+    {
+        SpvId elem_type_id = (SpvId)t->instruction->words[2];
+        spirv_type *elem_type = _get_type_by_id(info, elem_type_id);
+
+        SpvId length_var_id = (SpvId)t->instruction->words[3];
+        spirv_variable *length_var = _get_variable_by_id(info, length_var_id);
+
+        // maybe handle larger types
+        u32 length = length_var->instruction->words[3];
+        
+        return calculate_type_size(elem_type, info) * length;
+    }
+    case SpvOpTypeRuntimeArray: return 0;
+    case SpvOpTypeStruct:
+    {
+        // returns the size of the last member + the offset of the last member.
+        // does not account for padding after the struct.
+
+        if (t->members.size == 0)
+            return 0;
+
+        spirv_struct_type_member *last_member = t->members.data;
+        u64 max_offset = 0;
+
+        for_array(mem, &t->members)
+        if (mem->offset > max_offset)
+        {
+            max_offset = mem->offset;
+            last_member = mem;
+        }
+
+        if (max_offset > 0)
+        {
+            spirv_type *mem_type = _get_type_by_id(info, last_member->type_id);
+
+            return calculate_type_size(mem_type, info) + last_member->offset;
+        }
+        else
+        {
+            u64 total_size = 0;
+            for_array(mem2, &t->members)
+            {
+                spirv_type *mem_type = _get_type_by_id(info, mem2->type_id);
+                total_size += mem_type->size;
+            }
+
+            return total_size;
+        }
+    }
+    case SpvOpTypeOpaque:       return 0;
+    case SpvOpTypePointer:      return 0;
+    case SpvOpTypeFunction:     return 0;
+    case SpvOpTypeEvent:        return 0;
+    case SpvOpTypeDeviceEvent:  return 0;
+    case SpvOpTypeReserveId:    return 0;
+    case SpvOpTypeQueue:        return 0;
+    case SpvOpTypePipe:         return 0;
+    case SpvOpTypePipeStorage:  return 0;
+    case SpvOpTypeNamedBarrier: return 0;
+    default:
+        return 0;
+    }
+
+    return 0;
+}
+
+void collect_type_information(spirv_info *info)
+{
+    // get type sizes
+    for_array(t, &info->types)
+        t->size = calculate_type_size(t, info);
+}
+
+void print_extra_type_information_inline(spirv_type *t, spirv_info *info, u32 depth)
+{
+    spirv_id_instruction *instr = t->instruction;
+
+    switch (instr->opcode)
+    {
+    case SpvOpTypeVoid: printf("void"); break;
+    case SpvOpTypeBool: printf("bool"); break;
+    case SpvOpTypeInt:
+    {
+        u32 width = instr->words[2];
+        u32 sign  = instr->words[3];
+
+        if (sign)
+            printf("s%d", width);
+        else
+            printf("u%d", width);
+        break;
+    }
+    case SpvOpTypeFloat:
+    {
+        u32 width = instr->words[2];
+
+        if (width > 32)
+            printf("double");
+        else
+            printf("float");
+        break;
+    }
+    case SpvOpTypeVector:
+    {
+        SpvId comp_id = (SpvId)t->instruction->words[2];
+        spirv_type *comp_type = _get_type_by_id(info, comp_id);
+        u32 comp_count = t->instruction->words[3];
+
+        printf("vec%u<", comp_count);
+        print_extra_type_information_inline(comp_type, info, depth+1);
+        printf(">");
+        break;
+    }
+    case SpvOpTypeMatrix:
+    {
+        SpvId vec_id = (SpvId)t->instruction->words[2];
+        spirv_type *vec_type = _get_type_by_id(info, vec_id);
+        u32 column_count = t->instruction->words[3];
+
+        SpvId comp_id = (SpvId)vec_type->instruction->words[2];
+        spirv_type *comp_type = _get_type_by_id(info, comp_id);
+        u32 row_count = vec_type->instruction->words[3];
+
+        printf("mat%ux%u<", row_count, column_count);
+        print_extra_type_information_inline(comp_type, info, depth+1);
+        printf(">");
+        break;
+    }
+    case SpvOpTypeImage: printf("image"); break;
+    case SpvOpTypeSampler: printf("sampler"); break;
+    case SpvOpTypeSampledImage: printf("sampled_image"); break;
+    case SpvOpTypeArray:
+    {
+        SpvId elem_type_id = (SpvId)t->instruction->words[2];
+        spirv_type *elem_type = _get_type_by_id(info, elem_type_id);
+
+        SpvId length_var_id = (SpvId)t->instruction->words[3];
+        spirv_variable *length_var = _get_variable_by_id(info, length_var_id);
+
+        // maybe handle larger types
+        u32 length = length_var->instruction->words[3];
+        
+        print_extra_type_information_inline(elem_type, info, depth+1);
+        printf("[%u]", length);
+
+        break;
+    }
+    case SpvOpTypeRuntimeArray:
+    {
+        SpvId elem_type_id = (SpvId)t->instruction->words[2];
+        spirv_type *elem_type = _get_type_by_id(info, elem_type_id);
+        
+        printf("array<");
+        print_extra_type_information_inline(elem_type, info, depth+1);
+        printf(">");
+
+        break;
+    }
+    case SpvOpTypeStruct:
+    {
+        if (depth > 0)
+        {
+            printf("%s", t->instruction->name);
+            break;
+        }
+
+        printf("struct %s\n{\n", t->instruction->name);
+
+        for_array(mem, &t->members)
+        {
+            spirv_type *mem_type = _get_type_by_id(info, mem->type_id);
+            printf("\t[offset %3lu, size %3lu]\t", mem->offset, mem_type->size);
+            print_extra_type_information_inline(mem_type, info, depth+1);
+            printf(" %s;\n", mem->name);
+        }
+
+        printf("}");
+        break;
+    }
+    case SpvOpTypeOpaque:
+    {
+        const char *name = (const char *)t->instruction->words + 2;
+
+        printf("%s", name);
+    }
+    case SpvOpTypePointer:
+    {
+        SpvStorageClass storage = (SpvStorageClass)t->instruction->words[2];
+        SpvId type_id = (SpvId)t->instruction->words[3];
+        spirv_type *type = _get_type_by_id(info, type_id);
+
+        const char *storage_name = storage_class_name(storage);
+
+        printf("%s ", storage_name);
+        print_extra_type_information_inline(type, info, depth+1);
+        printf("*");
+
+        break;
+    }
+    case SpvOpTypeFunction: printf("function"); break;
+    case SpvOpTypeEvent: printf("event"); break;
+    case SpvOpTypeDeviceEvent: printf("device_event"); break;
+    case SpvOpTypeReserveId: printf("reserve_id"); break;
+    case SpvOpTypeQueue: printf("queue"); break;
+    case SpvOpTypePipe: printf("pipe"); break;
+    case SpvOpTypePipeStorage: printf("pipe_storage"); break;
+    case SpvOpTypeNamedBarrier: printf("named_barrier"); break;
+        break;
+    }
+}
+
+void print_extra_type_information(spirv_info *info)
+{
+    for_array(t, &info->types)
+    {
+        printf("%%%u [size %3lu]\t= ", t->instruction->id, t->size);
+        print_extra_type_information_inline(t, info, 0);
+        printf("\n");
+    }
+}
+
+void handle_spirv_op_type(u64 i, spirv_type *type, const spirv_info *info)
 {
     u32 bound = (u32)info->id_instructions.size;
+    spirv_id_instruction *id_instr = type->instruction;
     printf(INSTR_ID_FMT " ", i, id_instr->id);
 
     switch (id_instr->opcode)
@@ -194,13 +480,13 @@ void handle_spirv_op_type(u64 i, spirv_id_instruction *id_instr, const spirv_inf
         SpvId *member_ids = (SpvId*)(id_instr->words + 2);
         u32 member_count = id_instr->word_count - 2;
 
-        ::reserve(&id_instr->members, member_count);
-        id_instr->members.size = member_count;
+        ::reserve(&type->members, member_count);
+        type->members.size = member_count;
 
         for (u32 mem_i = 0; mem_i < member_count; ++mem_i)
         {
             SpvId mem_id = member_ids[mem_i];
-            id_instr->members[mem_i].type_id = mem_id;
+            type->members[mem_i].type_id = mem_id;
             printf(" %%%u", mem_id);
         }
 
@@ -631,7 +917,7 @@ bool parse_spirv_from_memory(memory_stream *input, spirv_info *output, error *er
     for_array(i, _idinstr, &output->id_instructions)
     {
         _idinstr->id = (SpvId)i;
-        init(_idinstr);
+        _idinstr->extra = 0;
     }
 
     array<spirv_instruction> instructions{};
@@ -885,6 +1171,11 @@ bool parse_spirv_from_memory(memory_stream *input, spirv_info *output, error *er
         }
     }
 
+    // we remember member name indices for debug information instructions
+    // because at this point there are no types / members to write to.
+    array<u64> member_name_idxs{};
+    defer { free(&member_name_idxs); };
+
     // 7.b OpName and OpMemberName
     for (; i < instruction_count; ++i)
     {
@@ -920,20 +1211,11 @@ bool parse_spirv_from_memory(memory_stream *input, spirv_info *output, error *er
             SpvId id = (SpvId)instr->words[1];
             assert(id < bound);
 
-            spirv_id_instruction *idinstr = output->id_instructions.data + id;
-
             u32 member = instr->words[2];
             const char *member_name = (const char *)(instr->words + 3);
-
-            if (member >= idinstr->members.reserved_size)
-                ::reserve(&idinstr->members, member + 4);
-
-            if (member >= idinstr->members.size)
-                idinstr->members.size = member + 1;
-
-            idinstr->members[member].name = member_name;
-
             printf(INSTR_FMT " OpMemberName %%%u %u \"%s\"\n", i, id, member, member_name);
+
+            ::add_at_end(&member_name_idxs, i);
 
             break;
         }
@@ -957,6 +1239,14 @@ bool parse_spirv_from_memory(memory_stream *input, spirv_info *output, error *er
         printf(INSTR_FMT " OpModuleProcessed %s\n", i, process);
         break;
     }
+
+    printf("\nDecorations\n");
+
+    // once again, since types are defined later (thanks khronos), we
+    // have to remember the member decoration indices and handle them
+    // later.
+    array<u64> member_decor_idxs{};
+    defer { free(&member_decor_idxs); };
 
     // 8. Decorations
     for (; i < instruction_count; ++i)
@@ -986,6 +1276,7 @@ bool parse_spirv_from_memory(memory_stream *input, spirv_info *output, error *er
         {
             assert(instr->word_count >= 4);
             ::add_at_end(&output->decorations, instr);
+            ::add_at_end(&member_decor_idxs, i);
             
             SpvId target_type_id = (SpvId)instr->words[1];
             assert(target_type_id < bound);
@@ -1027,6 +1318,8 @@ bool parse_spirv_from_memory(memory_stream *input, spirv_info *output, error *er
         break;
     }
 
+    printf("\nTypes\n");
+
     // 9. Type declarations
     for (; i < instruction_count; ++i)
     {
@@ -1064,8 +1357,13 @@ bool parse_spirv_from_memory(memory_stream *input, spirv_info *output, error *er
             spirv_id_instruction *id_instr = output->id_instructions.data + id;
 
             ::copy_memory(instr, id_instr, sizeof(spirv_instruction));
-            ::add_at_end(&output->types, spirv_type{ .instruction = id_instr });
-            handle_spirv_op_type(i, id_instr, output);
+            spirv_type *t = ::add_at_end(&output->types);
+            ::init(t);
+            t->instruction = id_instr;
+            t->size = UNCALCULATED;
+            id_instr->extra = output->types.size - 1; // index of the type in the types array...
+
+            handle_spirv_op_type(i, t, output);
             break;
         }
 
@@ -1090,7 +1388,10 @@ bool parse_spirv_from_memory(memory_stream *input, spirv_info *output, error *er
             spirv_id_instruction *id_instr = output->id_instructions.data + id;
 
             ::copy_memory(instr, id_instr, sizeof(spirv_instruction));
-            ::add_at_end(&output->variables, spirv_variable{ .instruction = id_instr });
+            spirv_variable *var = ::add_at_end(&output->variables);
+            var->instruction = id_instr;
+            id_instr->extra = output->variables.size - 1;
+
             handle_spirv_op_variable(i, id_instr, output);
             break;
         }
@@ -1111,6 +1412,68 @@ bool parse_spirv_from_memory(memory_stream *input, spirv_info *output, error *er
             break;
         }
     }
+
+    // take care of member debug info
+    for_array(_mem_idx, &member_name_idxs)
+    {
+        instr = instructions.data + *_mem_idx;
+
+        assert(instr->word_count >= 4);
+        SpvId id = (SpvId)instr->words[1];
+        assert(id < bound);
+
+        u32 member = instr->words[2];
+        const char *member_name = (const char *)(instr->words + 3);
+
+        spirv_id_instruction *idinstr = output->id_instructions.data + id;
+        assert(idinstr->extra < output->types.size);
+        spirv_type *type = output->types.data + idinstr->extra;
+
+        if (member >= type->members.reserved_size)
+            ::reserve(&type->members, member + 4);
+
+        if (member >= type->members.size)
+            type->members.size = member + 1;
+
+        type->members[member].name = member_name;
+        type->members[member].offset = 0;
+    }
+
+    // take care of member decorations
+    for_array(_mem_dec_idx, &member_decor_idxs)
+    {
+        instr = instructions.data + *_mem_dec_idx;
+
+        SpvId target_type_id = (SpvId)instr->words[1];
+
+        spirv_id_instruction *idinstr = output->id_instructions.data + target_type_id;
+        spirv_type *type = output->types.data + idinstr->extra;
+
+        u32 member = instr->words[2];
+
+        if (member >= type->members.reserved_size)
+            ::reserve(&type->members, member + 4);
+
+        if (member >= type->members.size)
+            type->members.size = member + 1;
+
+        SpvDecoration decoration = (SpvDecoration)instr->words[3];
+
+        switch (decoration)
+        {
+        case SpvDecorationOffset:
+        {
+            u32 offset = instr->words[4];
+            type->members[member].offset = offset;
+            break;
+        }
+
+        default:
+            break;
+        }
+    }
+
+    printf("\nFunctions\n");
 
     // 10. & 11. Functions
     for (; i < instruction_count; ++i)
@@ -1176,6 +1539,12 @@ bool parse_spirv_from_memory(memory_stream *input, spirv_info *output, error *er
             }
         }
     }
+
+    printf("\nExtra type information\n");
+
+    collect_type_information(output);
+
+    print_extra_type_information(output);
 
     return true;
 }

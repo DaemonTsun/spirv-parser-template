@@ -10,24 +10,14 @@ struct spirv_instruction
     u32 *words;
     u16 word_count;
     u16 opcode;
-};
-
-struct spirv_struct_type_member
-{
-    SpvId type_id;
-    const char *name;
+    u32 extra; // meaning changes depending on opcode
 };
 
 struct spirv_id_instruction : public spirv_instruction
 {
     SpvId id;
     const char *name;
-
-    array<spirv_struct_type_member> members;
 };
-
-void init(spirv_id_instruction *idinstr);
-void free(spirv_id_instruction *idinstr);
 
 struct spirv_entry_point_execution_mode
 {
@@ -51,10 +41,24 @@ struct spirv_entry_point
 void init(spirv_entry_point *ep);
 void free(spirv_entry_point *ep);
 
+struct spirv_struct_type_member
+{
+    SpvId type_id;
+    const char *name;
+
+    u64 offset;
+};
+
 struct spirv_type
 {
     spirv_id_instruction *instruction;
+
+    array<spirv_struct_type_member> members;
+    u64 size;
 };
+
+void init(spirv_type *type);
+void free(spirv_type *type);
 
 struct spirv_variable
 {
