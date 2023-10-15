@@ -5,6 +5,16 @@
 #include "shl/error.hpp"
 #include "shl/streams.hpp"
 
+struct spirv_instruction;
+struct spirv_id_instruction;
+struct spirv_function;
+struct spirv_entry_point_execution_mode;
+struct spirv_entry_point;
+struct spirv_struct_type_member;
+struct spirv_type;
+struct spirv_variable;
+struct spirv_info;
+
 struct spirv_instruction
 {
     u32 *words;
@@ -17,7 +27,23 @@ struct spirv_id_instruction : public spirv_instruction
 {
     SpvId id;
     const char *name;
+
+    array<u32> decoration_indices; // indices into spirv_info->decorations
 };
+
+void init(spirv_id_instruction *instr);
+void free(spirv_id_instruction *instr);
+
+struct spirv_function
+{
+    spirv_id_instruction *instruction;
+
+    array<u32> called_function_indices; // index into spirv_info->functions
+    array<spirv_variable*> referenced_variables;
+};
+
+void init(spirv_function *func);
+void free(spirv_function *func);
 
 struct spirv_entry_point_execution_mode
 {
@@ -29,6 +55,7 @@ struct spirv_entry_point_execution_mode
 struct spirv_entry_point
 {
     spirv_id_instruction *instruction;
+    u32 function_index; // index into spirv_info->functions
     SpvExecutionModel execution_model; // i.e. the stage
     const char *name; // name in OpEntryPoint, probably same as in OpName
 
@@ -52,9 +79,9 @@ struct spirv_struct_type_member
 struct spirv_type
 {
     spirv_id_instruction *instruction;
+    u64 size;
 
     array<spirv_struct_type_member> members;
-    u64 size;
 };
 
 void init(spirv_type *type);
@@ -72,6 +99,8 @@ struct spirv_info
     array<spirv_type> types;
     array<spirv_variable> variables; // and constants
     array<spirv_instruction> decorations;
+
+    array<spirv_function> functions;
 
     SpvAddressingModel addressing_model;
     SpvMemoryModel memory_model;

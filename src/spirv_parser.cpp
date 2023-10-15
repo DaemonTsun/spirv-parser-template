@@ -15,6 +15,29 @@
 
 #define UNCALCULATED max_value(u32)
 
+void init(spirv_id_instruction *instr)
+{
+    ::init(&instr->decoration_indices);
+    instr->extra = 0;
+}
+
+void free(spirv_id_instruction *instr)
+{
+    ::free(&instr->decoration_indices);
+}
+
+void init(spirv_function *func)
+{
+    ::init(&func->called_function_indices);
+    ::init(&func->referenced_variables);
+}
+
+void free(spirv_function *func)
+{
+    ::free(&func->called_function_indices);
+    ::free(&func->referenced_variables);
+}
+
 void init(spirv_entry_point *ep)
 {
     ::init(&ep->execution_modes);
@@ -47,9 +70,10 @@ void free(spirv_info *info)
     if (info == nullptr)
         return;
 
-    ::free(&info->id_instructions);
+    ::free<true>(&info->id_instructions);
     ::free<true>(&info->entry_points);
     ::free<true>(&info->types);
+    ::free<true>(&info->functions);
     ::free(&info->variables);
     ::free(&info->decorations);
 
@@ -73,6 +97,14 @@ spirv_type *_get_type_by_id(spirv_info *info, SpvId id)
 spirv_variable *_get_variable_by_id(spirv_info *info, SpvId id)
 {
     return info->variables.data + info->id_instructions[id].extra;
+}
+
+void collect_function_information(spirv_info *info)
+{
+    // we want to know all variables referenced in entry points
+    // so that we can generate DescriptorSet layouts
+    
+    // TODO: implement
 }
 
 const char *storage_class_name(SpvStorageClass storage)
@@ -916,8 +948,8 @@ bool parse_spirv_from_memory(memory_stream *input, spirv_info *output, error *er
 
     for_array(i, _idinstr, &output->id_instructions)
     {
+        init(_idinstr);
         _idinstr->id = (SpvId)i;
-        _idinstr->extra = 0;
     }
 
     array<spirv_instruction> instructions{};
@@ -1263,6 +1295,9 @@ bool parse_spirv_from_memory(memory_stream *input, spirv_info *output, error *er
             SpvId target_id = (SpvId)instr->words[1];
             assert(target_id < bound);
 
+            spirv_id_instruction *target_instr = output->id_instructions.data + target_id;
+            ::add_at_end(&target_instr->decoration_indices, (u32)i);
+
             printf(INSTR_FMT " OpDecorate %%%u", i, target_id);
 
             SpvDecoration decoration = (SpvDecoration)instr->words[2];
@@ -1280,6 +1315,9 @@ bool parse_spirv_from_memory(memory_stream *input, spirv_info *output, error *er
             
             SpvId target_type_id = (SpvId)instr->words[1];
             assert(target_type_id < bound);
+
+            spirv_id_instruction *target_instr = output->id_instructions.data + target_type_id;
+            ::add_at_end(&target_instr->decoration_indices, (u32)i);
 
             u32 member = instr->words[2];
 
@@ -1299,6 +1337,9 @@ bool parse_spirv_from_memory(memory_stream *input, spirv_info *output, error *er
             
             SpvId target_id = (SpvId)instr->words[1];
             assert(target_id < bound);
+
+            spirv_id_instruction *target_instr = output->id_instructions.data + target_id;
+            ::add_at_end(&target_instr->decoration_indices, (u32)i);
 
             printf(INSTR_FMT " OpDecorateId %%%u", i, target_id);
 
@@ -1489,6 +1530,20 @@ bool parse_spirv_from_memory(memory_stream *input, spirv_info *output, error *er
         SpvId result_id = (SpvId)instr->words[2];
         assert(result_id < bound);
 
+        spirv_id_instruction *id_instr = output->id_instructions.data + result_id;
+
+        u32 func_index = (u32)output->functions.size;
+        spirv_function *func = ::add_at_end(&output->functions);
+        init(func);
+        func->instruction = id_instr;
+
+        for_array(ep, &output->entry_points)
+        if (instr == ep->instruction)
+        {
+            ep->function_index = func_index;
+            break;
+        }
+
         SpvFunctionControlMask control_mask = (SpvFunctionControlMask)instr->words[3];
 
         SpvId function_type_id = (SpvId)instr->words[4];
@@ -1505,17 +1560,79 @@ bool parse_spirv_from_memory(memory_stream *input, spirv_info *output, error *er
             {
             case SpvOpFunctionParameter:
             {
-                assert(instr->opcode == SpvOpFunction);
-                assert(instr->word_count == 3);
+                assert(finstr->word_count == 3);
 
-                SpvId result_type_id = (SpvId)instr->words[1];
+                SpvId result_type_id = (SpvId)finstr->words[1];
                 assert(result_type_id < bound);
 
-                SpvId result_id = (SpvId)instr->words[2];
+                SpvId result_id = (SpvId)finstr->words[2];
                 assert(result_id < bound);
 
                 printf(INSTR_ID_FMT " OpFunctionParameter %%%u\n", i, result_id, result_type_id);
 
+                break;
+            }
+            case SpvOpLabel:
+            {
+                printf(INSTR_FMT " OpLabel\n", i);
+                break;
+            }
+            case SpvOpAccessChain:
+            {
+                assert(finstr->word_count >= 4);
+
+                SpvId result_type_id = (SpvId)finstr->words[1];
+                assert(result_type_id < bound);
+
+                SpvId result_id = (SpvId)finstr->words[2];
+                assert(result_id < bound);
+
+                SpvId base_id = (SpvId)finstr->words[3];
+                assert(base_id < bound);
+
+                printf(INSTR_ID_FMT " OpAccessChain %%%u %%%u", i, result_id, result_type_id, base_id);
+
+                for (u32 ac = 4; ac < finstr->word_count; ++ac)
+                {
+                    SpvId index_id = (SpvId)finstr->words[ac];
+                    assert(index_id < bound);
+
+                    printf(" %%%u", index_id);
+                }
+
+                printf("\n");
+
+                break;
+            }
+            case SpvOpLoad:
+            {
+                assert(finstr->word_count >= 4);
+
+                SpvId result_type_id = (SpvId)finstr->words[1];
+                assert(result_type_id < bound);
+
+                SpvId result_id = (SpvId)finstr->words[2];
+                assert(result_id < bound);
+
+                SpvId ptr_id = (SpvId)finstr->words[3];
+                assert(ptr_id < bound);
+
+                printf(INSTR_ID_FMT " OpLoad %%%u %%%u", i, result_id, result_type_id, ptr_id);
+
+                for (u32 load = 4; load < finstr->word_count; ++load)
+                {
+                    SpvMemoryAccessMask msk = (SpvMemoryAccessMask)finstr->words[load];
+
+                    printf(" %d", msk);
+                }
+
+                printf("\n");
+
+                break;
+            }
+            case SpvOpReturn:
+            {
+                printf(INSTR_FMT " OpReturn\n", i);
                 break;
             }
             case SpvOpFunctionEnd:
@@ -1527,6 +1644,8 @@ bool parse_spirv_from_memory(memory_stream *input, spirv_info *output, error *er
                 breakout = true;
                 break;
             }
+
+            // TODO: handle branches / other functions
 
             default:
                 break;
@@ -1540,11 +1659,15 @@ bool parse_spirv_from_memory(memory_stream *input, spirv_info *output, error *er
         }
     }
 
+    printf("\nExtra function information\n");
+
+    collect_function_information(output);
+
     printf("\nExtra type information\n");
 
     collect_type_information(output);
 
-    print_extra_type_information(output);
+    // print_extra_type_information(output);
 
     return true;
 }
