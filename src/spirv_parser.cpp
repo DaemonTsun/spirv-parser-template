@@ -15,10 +15,30 @@
 
 #define UNCALCULATED max_value(u32)
 
+bool next_instruction(memory_stream *stream, spirv_instruction *out)
+{
+    u64 diff = (u8*)out->words - (u8*)stream->data;
+    u64 len = out->word_count * sizeof(u32);
+    u64 offset = diff + len;
+
+    if (offset > stream->size)
+        return false;
+
+    assert(stream->size - offset >= 4);
+
+    out->words = (u32*)(stream->data + offset);
+
+    read_at(stream, &out->opcode, offset);
+    read_at(stream, &out->word_count, offset + sizeof(u16));
+
+    assert(out->word_count >= 1);
+    return true;
+}
+
 void init(spirv_id_instruction *instr)
 {
     ::init(&instr->decoration_indices);
-    instr->extra = 0;
+    instr->extra = max_value(u32);
 }
 
 void free(spirv_id_instruction *instr)
@@ -99,31 +119,78 @@ spirv_variable *_get_variable_by_id(spirv_info *info, SpvId id)
     return info->variables.data + info->id_instructions[id].extra;
 }
 
+void _add_referenced_variable_by_id(SpvId id, spirv_function *func, spirv_info *info)
+{
+    u32 index = info->id_instructions[id].extra;
+
+    if (index == max_value(u32))
+        return;
+
+    if (index >= info->variables.size)
+        return;
+
+    ::insert_element(&func->referenced_variables, info->variables.data + index);
+}
+
+void collect_function_used_variables(spirv_function *func, spirv_info *info)
+{
+    spirv_instruction instr;
+    ::copy_memory(func->instruction, &instr, sizeof(spirv_instruction));
+
+    while (next_instruction(&info->data, &instr))
+    {
+        if (instr.opcode == SpvOpFunctionEnd)
+            break;
+
+        switch (instr.opcode)
+        {
+        case SpvOpAccessChain:
+        {
+            // we only really care about base_id, the rest is fields inside it
+            SpvId base_id = (SpvId)instr.words[3];
+            _add_referenced_variable_by_id(base_id, func, info);
+            break;
+        }
+        case SpvOpLoad:
+        {
+            SpvId base_id = (SpvId)instr.words[3];
+            _add_referenced_variable_by_id(base_id, func, info);
+            break;
+        }
+
+        }
+    }
+
+    for_array(var, &func->referenced_variables)
+        printf("function %s (%%%u) references variable %%%u\n", func->instruction->name, func->instruction->id, (*var)->instruction->id);
+}
+
 void collect_function_information(spirv_info *info)
 {
     // we want to know all variables referenced in entry points
     // so that we can generate DescriptorSet layouts
     
-    // TODO: implement
+    for_array(func, &info->functions)
+        collect_function_used_variables(func, info);
 }
 
 const char *storage_class_name(SpvStorageClass storage)
 {
     switch (storage)
     {
-    case SpvStorageClassUniformConstant: return "uniform_constant";
-    case SpvStorageClassInput: return "input";
-    case SpvStorageClassUniform: return "uniform";
-    case SpvStorageClassOutput: return "output";
-    case SpvStorageClassWorkgroup: return "workgroup";
-    case SpvStorageClassCrossWorkgroup: return "cross_workgroup";
-    case SpvStorageClassPrivate: return "private";
-    case SpvStorageClassFunction: return "function";
-    case SpvStorageClassGeneric: return "generic";
-    case SpvStorageClassPushConstant: return "push_constant";
-    case SpvStorageClassAtomicCounter: return "atomic_counter";
-    case SpvStorageClassImage: return "image";
-    case SpvStorageClassStorageBuffer: return "storage_buffer";
+    case SpvStorageClassUniformConstant:    return "uniform_constant";
+    case SpvStorageClassInput:              return "input";
+    case SpvStorageClassUniform:            return "uniform";
+    case SpvStorageClassOutput:             return "output";
+    case SpvStorageClassWorkgroup:          return "workgroup";
+    case SpvStorageClassCrossWorkgroup:     return "cross_workgroup";
+    case SpvStorageClassPrivate:            return "private";
+    case SpvStorageClassFunction:           return "function";
+    case SpvStorageClassGeneric:            return "generic";
+    case SpvStorageClassPushConstant:       return "push_constant";
+    case SpvStorageClassAtomicCounter:      return "atomic_counter";
+    case SpvStorageClassImage:              return "image";
+    case SpvStorageClassStorageBuffer:      return "storage_buffer";
     default: return "";
     }
 
@@ -1066,7 +1133,7 @@ bool parse_spirv_from_memory(memory_stream *input, spirv_info *output, error *er
 
         spirv_id_instruction *id_instr = output->id_instructions.data + id;
 
-        ::copy_memory(instr, id_instr, sizeof(spirv_instruction));
+        // ::copy_memory(instr, id_instr, sizeof(spirv_instruction));
 
         spirv_entry_point *ep = ::add_at_end(&output->entry_points);
         ::init(ep);
@@ -1296,7 +1363,7 @@ bool parse_spirv_from_memory(memory_stream *input, spirv_info *output, error *er
             assert(target_id < bound);
 
             spirv_id_instruction *target_instr = output->id_instructions.data + target_id;
-            ::add_at_end(&target_instr->decoration_indices, (u32)i);
+            ::insert_element(&target_instr->decoration_indices, (u32)i);
 
             printf(INSTR_FMT " OpDecorate %%%u", i, target_id);
 
@@ -1317,7 +1384,7 @@ bool parse_spirv_from_memory(memory_stream *input, spirv_info *output, error *er
             assert(target_type_id < bound);
 
             spirv_id_instruction *target_instr = output->id_instructions.data + target_type_id;
-            ::add_at_end(&target_instr->decoration_indices, (u32)i);
+            ::insert_element(&target_instr->decoration_indices, (u32)i);
 
             u32 member = instr->words[2];
 
@@ -1339,7 +1406,7 @@ bool parse_spirv_from_memory(memory_stream *input, spirv_info *output, error *er
             assert(target_id < bound);
 
             spirv_id_instruction *target_instr = output->id_instructions.data + target_id;
-            ::add_at_end(&target_instr->decoration_indices, (u32)i);
+            ::insert_element(&target_instr->decoration_indices, (u32)i);
 
             printf(INSTR_FMT " OpDecorateId %%%u", i, target_id);
 
@@ -1531,6 +1598,7 @@ bool parse_spirv_from_memory(memory_stream *input, spirv_info *output, error *er
         assert(result_id < bound);
 
         spirv_id_instruction *id_instr = output->id_instructions.data + result_id;
+        ::copy_memory(instr, id_instr, sizeof(spirv_instruction));
 
         u32 func_index = (u32)output->functions.size;
         spirv_function *func = ::add_at_end(&output->functions);

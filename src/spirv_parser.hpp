@@ -2,6 +2,7 @@
 #include "spirv1_2.h"
 
 #include "shl/array.hpp"
+#include "shl/set.hpp"
 #include "shl/error.hpp"
 #include "shl/streams.hpp"
 
@@ -28,7 +29,7 @@ struct spirv_id_instruction : public spirv_instruction
     SpvId id;
     const char *name;
 
-    array<u32> decoration_indices; // indices into spirv_info->decorations
+    set<u32> decoration_indices; // indices into spirv_info->decorations
 };
 
 void init(spirv_id_instruction *instr);
@@ -39,7 +40,7 @@ struct spirv_function
     spirv_id_instruction *instruction;
 
     array<u32> called_function_indices; // index into spirv_info->functions
-    array<spirv_variable*> referenced_variables;
+    set<spirv_variable*> referenced_variables;
 };
 
 void init(spirv_function *func);
