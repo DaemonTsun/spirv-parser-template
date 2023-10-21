@@ -1,4 +1,6 @@
 
+#include <vulkan/vulkan_core.h>
+
 #include "spirv1_2.h"
 
 #include "shl/array.hpp"
@@ -117,3 +119,28 @@ spirv_entry_point *get_entry_point_by_id(spirv_info *info, SpvId id);
 bool parse_spirv_from_memory(memory_stream *input, spirv_info *output, error *err);
 bool parse_spirv_from_file(const char *file, spirv_info *output, error *err);
 
+
+// utility functions
+// indirect type size resolves pointers
+u64 get_indirect_type_size(SpvId type_id, spirv_info *info);
+
+struct spirv_descriptor_set
+{
+    array<VkDescriptorSetLayoutBinding> layout_bindings;
+};
+
+void init(spirv_descriptor_set *dset);
+void free(spirv_descriptor_set *dset);
+
+struct spirv_pipeline_info
+{
+    array<spirv_descriptor_set> descriptor_sets;
+    array<VkPushConstantRange> push_constants;
+};
+
+void init(spirv_pipeline_info *info);
+void free(spirv_pipeline_info *info);
+
+VkShaderStageFlags execution_model_to_shader_stage_flags(SpvExecutionModel model);
+
+void get_pipeline_info(spirv_pipeline_info *out, spirv_info *info);

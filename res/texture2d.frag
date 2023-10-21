@@ -8,5 +8,5 @@ layout(push_constant) uniform uPushConstant { float sec; uint frame; } pc;
 
 void main()
 {
-    outColor = In.Color * texture(sTexture, In.UV.st) * -1 + vec4(1.f, 1.f, 1.f, 1.f);
+    outColor = In.Color * texture(sTexture, In.UV.st) * -1 + vec4(pc.sec, 1.f, 1.f, 1.f);
 }

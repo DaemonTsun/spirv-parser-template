@@ -7,10 +7,13 @@ find_package(better REQUIRED PATHS ext/better-cmake/cmake)
 project(shl)
 project_author("DaemonTsun")
 
+find_package(Vulkan REQUIRED)
+
 add_exe(spirv-parser
     SOURCES_DIR "${ROOT}/src/"
     CPP_VERSION 20
     CPP_WARNINGS ALL SANE FATAL
+    LIBRARIES ${Vulkan_LIBRARIES}
     EXT
         LIB shl 0.8.1 "${ROOT}/ext/shl" INCLUDE LINK GIT_SUBMODULE
     )

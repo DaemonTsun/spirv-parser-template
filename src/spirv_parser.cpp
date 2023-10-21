@@ -60,6 +60,8 @@ void free(spirv_function *func)
 
 void init(spirv_entry_point *ep)
 {
+    ::fill_memory(ep, 0);
+    ep->function_index = max_value(u32);
     ::init(&ep->execution_modes);
 }
 
@@ -1011,7 +1013,7 @@ bool parse_spirv_from_memory(memory_stream *input, spirv_info *output, error *er
     printf("bound:           %u\n", bound);
 
     ::resize(&output->id_instructions, bound);
-    ::fill_memory(output->id_instructions.data, 0, output->id_instructions.size * sizeof(spirv_id_instruction));
+    ::fill_memory(output->id_instructions.data, 0, output->id_instructions.size);
 
     for_array(i, _idinstr, &output->id_instructions)
     {
@@ -1363,7 +1365,7 @@ bool parse_spirv_from_memory(memory_stream *input, spirv_info *output, error *er
             assert(target_id < bound);
 
             spirv_id_instruction *target_instr = output->id_instructions.data + target_id;
-            ::insert_element(&target_instr->decoration_indices, (u32)i);
+            ::insert_element(&target_instr->decoration_indices, (u32)output->decorations.size-1);
 
             printf(INSTR_FMT " OpDecorate %%%u", i, target_id);
 
@@ -1384,7 +1386,7 @@ bool parse_spirv_from_memory(memory_stream *input, spirv_info *output, error *er
             assert(target_type_id < bound);
 
             spirv_id_instruction *target_instr = output->id_instructions.data + target_type_id;
-            ::insert_element(&target_instr->decoration_indices, (u32)i);
+            ::insert_element(&target_instr->decoration_indices, (u32)output->decorations.size-1);
 
             u32 member = instr->words[2];
 
@@ -1406,7 +1408,7 @@ bool parse_spirv_from_memory(memory_stream *input, spirv_info *output, error *er
             assert(target_id < bound);
 
             spirv_id_instruction *target_instr = output->id_instructions.data + target_id;
-            ::insert_element(&target_instr->decoration_indices, (u32)i);
+            ::insert_element(&target_instr->decoration_indices, (u32)output->decorations.size-1);
 
             printf(INSTR_FMT " OpDecorateId %%%u", i, target_id);
 
@@ -1606,7 +1608,7 @@ bool parse_spirv_from_memory(memory_stream *input, spirv_info *output, error *er
         func->instruction = id_instr;
 
         for_array(ep, &output->entry_points)
-        if (instr == ep->instruction)
+        if (id_instr == ep->instruction)
         {
             ep->function_index = func_index;
             break;
@@ -1727,6 +1729,13 @@ bool parse_spirv_from_memory(memory_stream *input, spirv_info *output, error *er
         }
     }
 
+    for_array(ep, &output->entry_points)
+    if (ep->function_index == max_value(u32))
+    {
+        get_spirv_parse_error(err, "entry point %s has no function\n", ep->name);
+        return false;
+    }
+
     printf("\nExtra function information\n");
 
     collect_function_information(output);
@@ -1757,3 +1766,181 @@ bool parse_spirv_from_file(const char *file, spirv_info *output, error *err)
     return true;
 }
 
+// utility
+u64 get_indirect_type_size(SpvId type_id, spirv_info *info)
+{
+    spirv_type *t = _get_type_by_id(info, type_id);
+
+    if (t == nullptr)
+        return 0;
+
+    if (t->instruction->opcode == SpvOpTypePointer)
+        return get_indirect_type_size((SpvId)t->instruction->words[3], info);
+
+    return t->size;
+}
+
+VkDescriptorType get_descriptor_type_by_spirv_type(SpvId type_id, spirv_info *info, SpvStorageClass storage = (SpvStorageClass)max_value(int))
+{
+    spirv_type *t = _get_type_by_id(info, type_id);
+
+    if (t == nullptr)
+        return (VkDescriptorType)max_value(int);
+
+    switch (t->instruction->opcode)
+    {
+    case SpvOpTypePointer:
+    {
+        SpvStorageClass s = (SpvStorageClass)t->instruction->words[2];
+        SpvId rtype_id = (SpvId)t->instruction->words[3];
+
+        return get_descriptor_type_by_spirv_type(rtype_id, info, s);
+    }
+    case SpvOpTypeBool:
+    case SpvOpTypeInt:
+    case SpvOpTypeFloat:
+    case SpvOpTypeVector:
+    case SpvOpTypeMatrix:
+    case SpvOpTypeArray:
+    case SpvOpTypeRuntimeArray:
+    case SpvOpTypeStruct:
+    {
+        switch (storage)
+        {
+        case SpvStorageClassUniform:        return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        case SpvStorageClassStorageBuffer:  return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        default:                            return (VkDescriptorType)max_value(int);
+        }
+
+        break;
+    }
+    case SpvOpTypeImage:        return VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    case SpvOpTypeSampler:      return VK_DESCRIPTOR_TYPE_SAMPLER;
+    case SpvOpTypeSampledImage: return VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+
+    default:
+        return (VkDescriptorType)max_value(int);
+    }
+}
+
+void init(spirv_descriptor_set *dset)
+{
+    ::init(&dset->layout_bindings);
+}
+
+void free(spirv_descriptor_set *dset)
+{
+    ::free(&dset->layout_bindings);
+}
+
+void init(spirv_pipeline_info *info)
+{
+    ::init(&info->descriptor_sets);
+    ::init(&info->push_constants);
+}
+
+void free(spirv_pipeline_info *info)
+{
+    ::free<true>(&info->descriptor_sets);
+    ::free(&info->push_constants);
+}
+
+VkShaderStageFlags execution_model_to_shader_stage_flags(SpvExecutionModel model)
+{
+    if (model >= SpvExecutionModelKernel)
+        return 0;
+
+    return (VkShaderStageFlags)(1 << (int)(model));
+}
+
+void get_pipeline_info(spirv_pipeline_info *out, spirv_info *info)
+{
+    for_array(ep, &info->entry_points)
+    {
+        spirv_function *func = info->functions.data + ep->function_index;
+        VkShaderStageFlags stage_flags = execution_model_to_shader_stage_flags(ep->execution_model);
+
+        for_array(_var, &func->referenced_variables)
+        {
+            spirv_id_instruction *var_instr = (*_var)->instruction;
+            SpvId result_type_id = (SpvId)var_instr->words[1];
+
+            if (var_instr->opcode == SpvOpVariable
+             && ((SpvStorageClass)var_instr->words[3] == SpvStorageClassPushConstant))
+            {
+                VkPushConstantRange *range = ::add_at_end(&out->push_constants);
+                range->stageFlags = stage_flags;
+                range->offset = 0; // TODO: find out the offset???
+                range->size = get_indirect_type_size(result_type_id, info);
+                continue;
+            }
+
+            u32 dset = max_value(u32);
+            u32 binding = max_value(u32);
+
+            for_array(idx, &var_instr->decoration_indices)
+            {
+                spirv_instruction *decor_instr = info->decorations.data + (*idx);
+
+                if (decor_instr->opcode != SpvOpDecorate)
+                    continue;
+
+                SpvDecoration decoration = (SpvDecoration)decor_instr->words[2];
+
+                switch (decoration)
+                {
+                case SpvDecorationBinding:
+                {
+                    binding = decor_instr->words[3];
+                    break;
+                }
+                case SpvDecorationDescriptorSet:
+                {
+                    dset = decor_instr->words[3];
+                    break;
+                }
+                default:
+                    continue;
+                }
+
+                if (dset != max_value(u32) && binding != max_value(u32))
+                    break;
+            }
+
+            printf("%u %u\n", dset, binding);
+
+            if (dset == max_value(u32) || binding == max_value(u32))
+                continue;
+
+            if (dset >= out->descriptor_sets.size)
+            {
+                ::reserve(&out->descriptor_sets, dset + 4);
+
+                for (u64 _di = out->descriptor_sets.size; _di <= dset; ++_di)
+                    ::init(out->descriptor_sets.data + _di);
+
+                out->descriptor_sets.size = dset + 1;
+            }
+
+            spirv_descriptor_set *sds = out->descriptor_sets.data + dset;
+
+            if (binding >= sds->layout_bindings.size)
+            {
+                ::reserve(&sds->layout_bindings, binding + 4);
+
+                u64 cursize = sds->layout_bindings.size;
+                u64 diff = (binding + 1) - cursize;
+                ::fill_memory(sds->layout_bindings.data + cursize, 0, diff);
+
+                sds->layout_bindings.size = binding + 1;
+            }
+
+            VkDescriptorSetLayoutBinding *lb = sds->layout_bindings.data + binding;
+            lb->binding = binding;
+            lb->descriptorCount = 1; // TODO: implement descriptor count
+            lb->stageFlags |= stage_flags;
+            lb->pImmutableSamplers = nullptr;
+            lb->descriptorType = get_descriptor_type_by_spirv_type(result_type_id, info);
+        }
+    }
+}
